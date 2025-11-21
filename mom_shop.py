@@ -10,6 +10,42 @@ ADMIN_PASSWORD = "1234"
 
 
 # ---------------------------
+# 연락처 포맷팅 함수
+# ---------------------------
+def format_phone(raw):
+    """
+    문자열에서 숫자만 뽑아서 휴대폰/전화번호 형태로 포맷팅.
+    기본적으로 010 번호를 우선 가정.
+    """
+    if raw is None:
+        return ""
+
+    digits = "".join(ch for ch in str(raw) if ch.isdigit())
+
+    if not digits:
+        return ""
+
+    # 8자리만 입력한 경우 → 010-xxxx-xxxx 로 간주
+    if len(digits) == 8:
+        return f"010-{digits[:4]}-{digits[4:]}"
+
+    # 11자리, 010으로 시작
+    if len(digits) == 11 and digits.startswith("010"):
+        return f"{digits[:3]}-{digits[3:7]}-{digits[7:]}"
+
+    # 10자리, 0으로 시작 (지역번호 포함)
+    if len(digits) == 10 and digits.startswith("0"):
+        return f"{digits[:2]}-{digits[2:6]}-{digits[6:]}" if digits.startswith("02") else f"{digits[:3]}-{digits[3:6]}-{digits[6:]}"
+
+    # 기타 11자리
+    if len(digits) == 11:
+        return f"{digits[:3]}-{digits[3:7]}-{digits[7:]}"
+
+    # 그 외는 그냥 숫자 그대로
+    return digits
+
+
+# ---------------------------
 # DB 초기화
 # ---------------------------
 def init_db():
@@ -58,6 +94,8 @@ def insert_job(
 ):
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
+    # 연락처 포맷팅
+    phone_formatted = format_phone(customer_phone)
     cur.execute(
         """
         INSERT INTO jobs (
@@ -71,7 +109,7 @@ def insert_job(
         (
             dropoff_date,
             customer_name,
-            customer_phone,
+            phone_formatted,
             item_type,
             work_hem,
             work_sleeve,
@@ -81,13 +119,15 @@ def insert_job(
             payment_method,
             is_prepaid,
             pickup_date,
-            0,  # 처음 저장될 때는 항상 아직 찾지 않음
+            0,  # 처음 저장될 때는 아직 '찾지 않음'
             memo,
             datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         ),
     )
+    job_id = cur.lastrowid
     conn.commit()
     conn.close()
+    return job_id
 
 
 def update_job(
@@ -109,6 +149,7 @@ def update_job(
 ):
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
+    phone_formatted = format_phone(customer_phone)
     cur.execute(
         """
         UPDATE jobs SET
@@ -131,7 +172,7 @@ def update_job(
         (
             dropoff_date,
             customer_name,
-            customer_phone,
+            phone_formatted,
             item_type,
             work_hem,
             work_sleeve,
@@ -186,6 +227,15 @@ def load_jobs_by_pickup(target_date):
     return df
 
 
+def load_job_by_id(job_id):
+    conn = sqlite3.connect(DB_PATH)
+    df = pd.read_sql_query("SELECT * FROM jobs WHERE id = ?", conn, params=[job_id])
+    conn.close()
+    if df.empty:
+        return None
+    return df.iloc[0]
+
+
 def mark_picked_up(job_id):
     """해당 옷을 '찾아감' 상태로 변경"""
     conn = sqlite3.connect(DB_PATH)
@@ -213,7 +263,7 @@ def admin_login():
                 st.error("비밀번호가 올바르지 않습니다.")
 
     if st.session_state.is_admin:
-        st.caption("✅ 관리자 모드: 편집 / 삭제 / 입력 가능")
+        st.caption("✅ 관리자 모드: 매출 입력 / 수정 / 삭제 가능")
     else:
         st.caption("ℹ️ 관리자 비밀번호를 입력하지 않으면 조회만 가능합니다.")
 
@@ -229,12 +279,25 @@ def main():
 
     # 관리자 로그인 영역
     admin_login()
+    is_admin = st.session_state.get("is_admin", False)
 
-    menu = st.radio(
-        "메뉴 선택",
-        ["대시보드", "매출 입력하기", "매출 내역 보기", "데이터 수정", "월별 합계 보기"],
-        horizontal=True,
-    )
+    # 관리자 여부에 따라 메뉴 구성 달리하기
+    if is_admin:
+        menu_options = [
+            "대시보드",
+            "매출 입력하기",
+            "매출 내역 보기",
+            "데이터 수정",
+            "월별 합계 보기",
+        ]
+    else:
+        menu_options = [
+            "대시보드",
+            "매출 내역 보기",
+            "월별 합계 보기",
+        ]
+
+    menu = st.radio("메뉴 선택", menu_options, horizontal=True)
 
     if menu == "대시보드":
         page_dashboard()
@@ -287,14 +350,14 @@ def page_dashboard():
                 checked = st.checkbox("찾음", key=f"pickup_{row['id']}")
             with col2:
                 tasks = []
-                if row['work_hem']:
+                if row["work_hem"]:
                     tasks.append("기장")
-                if row['work_sleeve']:
+                if row["work_sleeve"]:
                     tasks.append("소매")
-                if row['work_width']:
+                if row["work_width"]:
                     tasks.append("품")
-                if row['work_other']:
-                    tasks.append(row['work_other'])
+                if row["work_other"]:
+                    tasks.append(row["work_other"])
 
                 st.markdown(
                     f"""
@@ -313,14 +376,14 @@ def page_dashboard():
         else:
             # 조회 전용: 체크박스 없이 정보만 표시
             tasks = []
-            if row['work_hem']:
+            if row["work_hem"]:
                 tasks.append("기장")
-            if row['work_sleeve']:
+            if row["work_sleeve"]:
                 tasks.append("소매")
-            if row['work_width']:
+            if row["work_width"]:
                 tasks.append("품")
-            if row['work_other']:
-                tasks.append(row['work_other'])
+            if row["work_other"]:
+                tasks.append(row["work_other"])
 
             st.markdown(
                 f"""
@@ -349,7 +412,7 @@ def page_input():
     if "last_customer_name" not in st.session_state:
         st.session_state.last_customer_name = ""
     if "last_customer_phone" not in st.session_state:
-        st.session_state.last_customer_phone = ""
+        st.session_state.last_customer_phone = "010-"
     if "last_dropoff_date" not in st.session_state:
         st.session_state.last_dropoff_date = date.today()
     if "last_pickup_date" not in st.session_state:
@@ -367,8 +430,8 @@ def page_input():
         )
     with col2:
         customer_phone = st.text_input(
-            "연락처 (선택)",
-            value=st.session_state.last_customer_phone,
+            "연락처 (숫자만 입력해도 자동으로 '-' 정리됨)",
+            value=st.session_state.last_customer_phone or "010-",
         )
 
     col3, col4 = st.columns(2)
@@ -468,7 +531,7 @@ def page_input():
         dropoff_str = dropoff_date_input.strftime("%Y-%m-%d")
         pickup_str = pickup_date_input.strftime("%Y-%m-%d")
 
-        insert_job(
+        job_id = insert_job(
             dropoff_str,
             customer_name,
             customer_phone,
@@ -487,20 +550,64 @@ def page_input():
         st.success("저장되었습니다! 🙆‍♀️")
         st.balloons()
 
-        # 저장 후 기본 금액 4,000원으로 초기화
-        st.session_state.current_price = 4000
+        # 저장 후 연락처/날짜 세션 값 갱신
+        phone_formatted = format_phone(customer_phone)
 
         # 같은 고객 이어서 입력 여부
         if same_customer:
             st.session_state.last_customer_name = customer_name
-            st.session_state.last_customer_phone = customer_phone
+            st.session_state.last_customer_phone = phone_formatted or "010-"
             st.session_state.last_dropoff_date = dropoff_date_input
             st.session_state.last_pickup_date = pickup_date_input
         else:
             st.session_state.last_customer_name = ""
-            st.session_state.last_customer_phone = ""
+            st.session_state.last_customer_phone = "010-"
             st.session_state.last_dropoff_date = date.today()
             st.session_state.last_pickup_date = date.today() + timedelta(days=3)
+
+        # 저장 후 기본 금액 4,000원으로 초기화
+        st.session_state.current_price = 4000
+
+        # 🔎 방금 저장한 건 기준으로 작업 전표 미리보기
+        row = load_job_by_id(job_id)
+        if row is not None:
+            tasks = []
+            if row["work_hem"]:
+                tasks.append("기장")
+            if row["work_sleeve"]:
+                tasks.append("소매")
+            if row["work_width"]:
+                tasks.append("품")
+            if row["work_other"]:
+                tasks.append(row["work_other"])
+
+            task_text = ", ".join(tasks) if tasks else "없음"
+            payment_status = "결제 완료" if row["is_prepaid"] == 1 else "미결제"
+
+            receipt_text = f"""────────────────────────
+        에벤에셀옷수선
+────────────────────────
+고객명: {row['customer_name'] or ''}
+연락처: {row['customer_phone'] or ''}
+
+맡긴날: {row['dropoff_date']}
+찾는날: {row['pickup_date'] or ''}
+
+종류: {row['item_type']}
+작업: {task_text}
+
+결제 여부: {payment_status}
+결제수단: {row['payment_method']}
+
+금액: {int(row['price']):,}원
+번호(ID): #{row['id']}
+────────────────────────
+        내부 보관용
+────────────────────────
+"""
+            st.markdown("#### 🧾 방금 저장된 건 작업 전표")
+            st.text_area("전표 내용 (복사해서 인쇄에 사용 가능)", value=receipt_text, height=260)
+            st.caption("※ 실제 영수증 프린터로 인쇄할 때는 브라우저 인쇄(Ctrl+P)와 작은 용지 설정을 사용하면 됩니다.")
 
         st.rerun()
 
@@ -638,7 +745,10 @@ def page_edit():
     )
 
     customer_name = st.text_input("고객 이름", value=row["customer_name"] or "")
-    customer_phone = st.text_input("연락처", value=row["customer_phone"] or "")
+    customer_phone = st.text_input(
+        "연락처",
+        value=row["customer_phone"] or "010-",
+    )
     item_type = st.text_input("옷 종류", value=row["item_type"])
 
     col_w1, col_w2, col_w3, col_w4 = st.columns(4)
@@ -701,14 +811,14 @@ def page_edit():
         tasks.append(work_other)
 
     task_text = ", ".join(tasks) if tasks else "없음"
-
     payment_status = "결제 완료" if is_prepaid == 1 else "미결제"
+    phone_formatted = format_phone(customer_phone)
 
     receipt_text = f"""────────────────────────
         에벤에셀옷수선
 ────────────────────────
 고객명: {customer_name or ''}
-연락처: {customer_phone or ''}
+연락처: {phone_formatted or ''}
 
 맡긴날: {dropoff_date_input.strftime('%Y-%m-%d')}
 찾는날: {pickup_date_input.strftime('%Y-%m-%d')}
@@ -727,8 +837,7 @@ def page_edit():
 """
 
     st.text_area("전표 내용", value=receipt_text, height=260)
-
-    st.caption("※ 나중에 영수증 프린터를 연결하면, 이 내용을 기준으로 작은 용지로 인쇄하면 됩니다.")
+    st.caption("※ 실제 영수증 프린터로 인쇄할 때는 브라우저 인쇄(Ctrl+P)와 작은 용지 설정을 사용하면 됩니다.")
 
     col_b1, col_b2 = st.columns(2)
     with col_b1:
