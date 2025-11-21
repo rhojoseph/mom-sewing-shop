@@ -5,7 +5,7 @@ from datetime import datetime, date, timedelta
 
 DB_PATH = "mom_shop.db"
 
-# 🔐 관리자 비밀번호 (원하는 값으로 바꿔 사용하면 됨)
+# 🔐 관리자 비밀번호
 ADMIN_PASSWORD = "1234"
 
 
@@ -35,7 +35,10 @@ def format_phone(raw):
 
     # 10자리, 0으로 시작 (지역번호 포함)
     if len(digits) == 10 and digits.startswith("0"):
-        return f"{digits[:2]}-{digits[2:6]}-{digits[6:]}" if digits.startswith("02") else f"{digits[:3]}-{digits[3:6]}-{digits[6:]}"
+        if digits.startswith("02"):
+            return f"{digits[:2]}-{digits[2:6]}-{digits[6:]}"
+        else:
+            return f"{digits[:3]}-{digits[3:6]}-{digits[6:]}"
 
     # 기타 11자리
     if len(digits) == 11:
@@ -51,6 +54,8 @@ def format_phone(raw):
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
+
+    # 기본 테이블 생성 (printed_count 포함)
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS jobs (
@@ -69,10 +74,20 @@ def init_db():
             pickup_date TEXT,
             picked_up INTEGER NOT NULL DEFAULT 0,
             memo TEXT,
+            printed_count INTEGER NOT NULL DEFAULT 0,
             created_at TEXT NOT NULL
         )
         """
     )
+
+    # 기존 DB에 printed_count 컬럼이 없으면 추가
+    cur.execute("PRAGMA table_info(jobs)")
+    cols = [row[1] for row in cur.fetchall()]
+    if "printed_count" not in cols:
+        cur.execute(
+            "ALTER TABLE jobs ADD COLUMN printed_count INTEGER NOT NULL DEFAULT 0"
+        )
+
     conn.commit()
     conn.close()
 
@@ -94,7 +109,6 @@ def insert_job(
 ):
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
-    # 연락처 포맷팅
     phone_formatted = format_phone(customer_phone)
     cur.execute(
         """
@@ -102,9 +116,9 @@ def insert_job(
             dropoff_date, customer_name, customer_phone,
             item_type, work_hem, work_sleeve, work_width, work_other,
             price, payment_method, is_prepaid, pickup_date,
-            picked_up, memo, created_at
+            picked_up, memo, printed_count, created_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
         """,
         (
             dropoff_date,
@@ -119,7 +133,7 @@ def insert_job(
             payment_method,
             is_prepaid,
             pickup_date,
-            0,  # 처음 저장될 때는 아직 '찾지 않음'
+            0,
             memo,
             datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         ),
@@ -211,11 +225,14 @@ def load_jobs(start_date=None, end_date=None):
     query += " ORDER BY dropoff_date DESC, id DESC"
     df = pd.read_sql_query(query, conn, params=params)
     conn.close()
+
+    if "printed_count" not in df.columns:
+        df["printed_count"] = 0
+
     return df
 
 
 def load_jobs_by_pickup(target_date):
-    """찾는 날 기준으로 특정 날짜 찾아갈 옷 조회 (picked_up=0만)"""
     conn = sqlite3.connect(DB_PATH)
     query = """
         SELECT * FROM jobs
@@ -224,6 +241,8 @@ def load_jobs_by_pickup(target_date):
     """
     df = pd.read_sql_query(query, conn, params=[target_date])
     conn.close()
+    if "printed_count" not in df.columns:
+        df["printed_count"] = 0
     return df
 
 
@@ -233,16 +252,79 @@ def load_job_by_id(job_id):
     conn.close()
     if df.empty:
         return None
+    if "printed_count" not in df.columns:
+        df["printed_count"] = 0
     return df.iloc[0]
 
 
 def mark_picked_up(job_id):
-    """해당 옷을 '찾아감' 상태로 변경"""
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     cur.execute("UPDATE jobs SET picked_up = 1 WHERE id = ?", (job_id,))
     conn.commit()
     conn.close()
+
+
+def mark_printed(job_id):
+    """전표를 출력했다고 표시 (printed_count + 1)"""
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE jobs SET printed_count = COALESCE(printed_count,0) + 1 WHERE id = ?",
+        (job_id,),
+    )
+    conn.commit()
+    conn.close()
+
+
+# ---------------------------
+# 전표 텍스트 생성 공통 함수
+# ---------------------------
+def build_receipt_text(row):
+    tasks = []
+    if row["work_hem"]:
+        tasks.append("기장")
+    if row["work_sleeve"]:
+        tasks.append("소매")
+    if row["work_width"]:
+        tasks.append("품")
+    if row["work_other"]:
+        tasks.append(row["work_other"])
+
+    task_text = ", ".join(tasks) if tasks else "없음"
+    payment_status = "결제 완료" if row["is_prepaid"] == 1 else "미결제"
+
+    dropoff = row["dropoff_date"] or ""
+    pickup = row["pickup_date"] or ""
+    name = row["customer_name"] or ""
+    phone = row["customer_phone"] or ""
+    item = row["item_type"] or ""
+    pay_method = row["payment_method"] or ""
+    price = int(row["price"]) if row["price"] is not None else 0
+    job_id = row["id"]
+
+    text = f"""────────────────────────
+        에벤에셀옷수선
+────────────────────────
+고객명: {name}
+연락처: {phone}
+
+맡긴날: {dropoff}
+찾는날: {pickup}
+
+종류: {item}
+작업: {task_text}
+
+결제 여부: {payment_status}
+결제수단: {pay_method}
+
+금액: {price:,}원
+번호(ID): #{job_id}
+────────────────────────
+        내부 보관용
+────────────────────────
+"""
+    return text
 
 
 # ---------------------------
@@ -263,7 +345,7 @@ def admin_login():
                 st.error("비밀번호가 올바르지 않습니다.")
 
     if st.session_state.is_admin:
-        st.caption("✅ 관리자 모드: 매출 입력 / 수정 / 삭제 가능")
+        st.caption("✅ 관리자 모드: 매출 입력 / 수정 / 전표 출력 / 삭제 가능")
     else:
         st.caption("ℹ️ 관리자 비밀번호를 입력하지 않으면 조회만 가능합니다.")
 
@@ -277,15 +359,14 @@ def main():
 
     st.title("👗 에벤에셀옷수선 매출장")
 
-    # 관리자 로그인 영역
     admin_login()
     is_admin = st.session_state.get("is_admin", False)
 
-    # 관리자 여부에 따라 메뉴 구성 달리하기
     if is_admin:
         menu_options = [
             "대시보드",
             "매출 입력하기",
+            "전표 출력",
             "매출 내역 보기",
             "데이터 수정",
             "월별 합계 보기",
@@ -303,6 +384,8 @@ def main():
         page_dashboard()
     elif menu == "매출 입력하기":
         page_input()
+    elif menu == "전표 출력":
+        page_print()
     elif menu == "매출 내역 보기":
         page_list()
     elif menu == "데이터 수정":
@@ -312,7 +395,7 @@ def main():
 
 
 # ---------------------------
-# 대시보드 (날짜 선택 가능)
+# 대시보드
 # ---------------------------
 def page_dashboard():
     st.header("📊 찾으러 올 고객 대시보드")
@@ -327,7 +410,6 @@ def page_dashboard():
         st.info(f"{target_str} 기준으로 찾으러 올 옷이 없습니다.")
         return
 
-    # 고객 수 / 옷 개수
     df["customer_key"] = (
         df["customer_name"].fillna("").astype(str)
         + "|"
@@ -361,20 +443,19 @@ def page_dashboard():
 
                 st.markdown(
                     f"""
-                    **[{row['id']}] {row['customer_name'] or '이름 없음'}**  
-                    - 연락처: {row['customer_phone'] or '없음'}  
-                    - 맡긴 날: {row['dropoff_date']}  
-                    - 옷 종류: {row['item_type']}  
-                    - 작업: {", ".join(tasks) if tasks else "기록 없음"}  
-                    - 금액: {int(row['price']):,}원 | 결제: {row['payment_method']}
-                    """
+**[{row['id']}] {row['customer_name'] or '이름 없음'}**  
+- 연락처: {row['customer_phone'] or '없음'}  
+- 맡긴 날: {row['dropoff_date']}  
+- 옷 종류: {row['item_type']}  
+- 작업: {", ".join(tasks) if tasks else "기록 없음"}  
+- 금액: {int(row['price']):,}원 | 결제: {row['payment_method']}
+"""
                 )
 
             if checked:
                 mark_picked_up(row["id"])
                 st.rerun()
         else:
-            # 조회 전용: 체크박스 없이 정보만 표시
             tasks = []
             if row["work_hem"]:
                 tasks.append("기장")
@@ -387,19 +468,19 @@ def page_dashboard():
 
             st.markdown(
                 f"""
-                **[{row['id']}] {row['customer_name'] or '이름 없음'}**  
-                - 연락처: {row['customer_phone'] or '없음'}  
-                - 맡긴 날: {row['dropoff_date']}  
-                - 옷 종류: {row['item_type']}  
-                - 작업: {", ".join(tasks) if tasks else "기록 없음"}  
-                - 금액: {int(row['price']):,}원 | 결제: {row['payment_method']}  
-                - 상태: 아직 찾아가지 않음
-                """
+**[{row['id']}] {row['customer_name'] or '이름 없음'}**  
+- 연락처: {row['customer_phone'] or '없음'}  
+- 맡긴 날: {row['dropoff_date']}  
+- 옷 종류: {row['item_type']}  
+- 작업: {", ".join(tasks) if tasks else "기록 없음"}  
+- 금액: {int(row['price']):,}원 | 결제: {row['payment_method']}  
+- 상태: 아직 찾아가지 않음
+"""
             )
 
 
 # ---------------------------
-# 입력 화면
+# 매출 입력
 # ---------------------------
 def page_input():
     st.header("📝 매출 입력하기")
@@ -408,7 +489,6 @@ def page_input():
         st.warning("관리자 비밀번호를 입력해야 매출을 입력할 수 있습니다.")
         return
 
-    # 최근 손님 유지용 세션 변수
     if "last_customer_name" not in st.session_state:
         st.session_state.last_customer_name = ""
     if "last_customer_phone" not in st.session_state:
@@ -418,7 +498,7 @@ def page_input():
     if "last_pickup_date" not in st.session_state:
         st.session_state.last_pickup_date = date.today() + timedelta(days=3)
     if "current_price" not in st.session_state:
-        st.session_state.current_price = 4000   # 기본 금액 4,000원
+        st.session_state.current_price = 4000
 
     st.markdown("#### 0. 고객 정보")
     col1, col2 = st.columns(2)
@@ -473,7 +553,6 @@ def page_input():
 
     st.markdown("#### 3. 금액 / 결제 정보")
 
-    # 현재 금액 입력창
     price = st.number_input(
         "금액(원)",
         min_value=0,
@@ -482,7 +561,6 @@ def page_input():
         format="%d",
     )
 
-    # 금액 + 버튼들
     col_p1, col_p2, col_p3, col_p4 = st.columns(4)
     with col_p1:
         if st.button("+1,000원"):
@@ -501,10 +579,8 @@ def page_input():
             st.session_state.current_price += 50000
             st.rerun()
 
-    # 사용자가 number_input에서 직접 수정한 값도 반영
     st.session_state.current_price = price
 
-    # 카드가 기본 선택 되도록 카드 / 현금 / 계좌이체 순서
     payment_method = st.radio(
         "결제 수단",
         ["카드", "현금", "계좌이체"],
@@ -550,10 +626,8 @@ def page_input():
         st.success("저장되었습니다! 🙆‍♀️")
         st.balloons()
 
-        # 저장 후 연락처/날짜 세션 값 갱신
         phone_formatted = format_phone(customer_phone)
 
-        # 같은 고객 이어서 입력 여부
         if same_customer:
             st.session_state.last_customer_name = customer_name
             st.session_state.last_customer_phone = phone_formatted or "010-"
@@ -565,55 +639,132 @@ def page_input():
             st.session_state.last_dropoff_date = date.today()
             st.session_state.last_pickup_date = date.today() + timedelta(days=3)
 
-        # 저장 후 기본 금액 4,000원으로 초기화
         st.session_state.current_price = 4000
 
-        # 🔎 방금 저장한 건 기준으로 작업 전표 미리보기
-        row = load_job_by_id(job_id)
-        if row is not None:
-            tasks = []
-            if row["work_hem"]:
-                tasks.append("기장")
-            if row["work_sleeve"]:
-                tasks.append("소매")
-            if row["work_width"]:
-                tasks.append("품")
-            if row["work_other"]:
-                tasks.append(row["work_other"])
-
-            task_text = ", ".join(tasks) if tasks else "없음"
-            payment_status = "결제 완료" if row["is_prepaid"] == 1 else "미결제"
-
-            receipt_text = f"""────────────────────────
-        에벤에셀옷수선
-────────────────────────
-고객명: {row['customer_name'] or ''}
-연락처: {row['customer_phone'] or ''}
-
-맡긴날: {row['dropoff_date']}
-찾는날: {row['pickup_date'] or ''}
-
-종류: {row['item_type']}
-작업: {task_text}
-
-결제 여부: {payment_status}
-결제수단: {row['payment_method']}
-
-금액: {int(row['price']):,}원
-번호(ID): #{row['id']}
-────────────────────────
-        내부 보관용
-────────────────────────
-"""
-            st.markdown("#### 🧾 방금 저장된 건 작업 전표")
-            st.text_area("전표 내용 (복사해서 인쇄에 사용 가능)", value=receipt_text, height=260)
-            st.caption("※ 실제 영수증 프린터로 인쇄할 때는 브라우저 인쇄(Ctrl+P)와 작은 용지 설정을 사용하면 됩니다.")
-
+        # 저장 후에는 전표 출력 탭에서 신규 출력/재출력 관리
+        st.info("전표가 필요하면 상단 메뉴의 '전표 출력' 탭에서 신규 출력으로 관리할 수 있습니다.")
         st.rerun()
 
 
 # ---------------------------
-# 내역 보기 (조회 전용)
+# 전표 출력 탭
+# ---------------------------
+def page_print():
+    st.header("🧾 전표 출력")
+
+    if not st.session_state.get("is_admin", False):
+        st.warning("관리자 비밀번호를 입력해야 전표 출력 관리를 할 수 있습니다.")
+        return
+
+    today = date.today()
+    start_date, end_date = st.date_input(
+        "기간 선택 (맡긴 날 기준)",
+        value=(date(today.year, today.month, 1), today),
+    )
+
+    df = load_jobs(
+        start_date.strftime("%Y-%m-%d"),
+        end_date.strftime("%Y-%m-%d"),
+    )
+
+    if df.empty:
+        st.info("해당 기간에 데이터가 없습니다.")
+        return
+
+    if "printed_count" not in df.columns:
+        df["printed_count"] = 0
+
+    new_df = df[df["printed_count"] == 0]
+    re_df = df[df["printed_count"] > 0]
+
+    tab1, tab2 = st.tabs(["🆕 신규 출력(한 번도 출력 안 한 건)", "🔁 재출력(이미 출력된 전표)"])
+
+    # 신규 출력 탭
+    with tab1:
+        if new_df.empty:
+            st.info("신규 출력할 전표가 없습니다. (printed_count=0 인 건이 없음)")
+        else:
+            st.markdown("#### 신규 출력 대상 목록")
+            st.dataframe(
+                new_df[["id", "dropoff_date", "customer_name", "item_type", "price"]],
+                use_container_width=True,
+            )
+
+            st.markdown("---")
+            st.markdown("#### 전표 출력할 건 선택")
+
+            # 행마다 '전표 보기 / 출력했다고 표시' 버튼
+            for _, row in new_df.iterrows():
+                col1, col2, col3 = st.columns([1, 3, 2])
+                with col1:
+                    if st.button("🧾 전표 보기", key=f"new_view_{row['id']}"):
+                        receipt = build_receipt_text(row)
+                        st.session_state["last_receipt"] = receipt
+                        st.session_state["last_receipt_id"] = row["id"]
+                        st.session_state["last_receipt_mode"] = "new"
+                        st.rerun()
+                with col2:
+                    st.markdown(
+                        f"**[{row['id']}] {row['customer_name'] or '이름 없음'}** / {row['item_type']} / {int(row['price']):,}원"
+                    )
+                with col3:
+                    if st.button("✅ 출력했다고 표시", key=f"new_print_{row['id']}"):
+                        mark_printed(row["id"])
+                        st.success(f"번호 {row['id']} 전표를 '신규 출력 완료'로 기록했습니다.")
+                        st.rerun()
+
+    # 재출력 탭
+    with tab2:
+        if re_df.empty:
+            st.info("재출력할 전표가 없습니다. (printed_count>0 인 건이 없음)")
+        else:
+            st.markdown("#### 재출력 대상 목록")
+            temp = re_df.copy()
+            temp["출력횟수"] = temp["printed_count"]
+            st.dataframe(
+                temp[["id", "dropoff_date", "customer_name", "item_type", "price", "출력횟수"]],
+                use_container_width=True,
+            )
+
+            st.markdown("---")
+            st.markdown("#### 재출력할 건 선택")
+
+            for _, row in re_df.iterrows():
+                col1, col2, col3 = st.columns([1, 3, 2])
+                with col1:
+                    if st.button("🧾 전표 보기", key=f"re_view_{row['id']}"):
+                        receipt = build_receipt_text(row)
+                        st.session_state["last_receipt"] = receipt
+                        st.session_state["last_receipt_id"] = row["id"]
+                        st.session_state["last_receipt_mode"] = "re"
+                        st.rerun()
+                with col2:
+                    st.markdown(
+                        f"**[{row['id']}] {row['customer_name'] or '이름 없음'}** / {row['item_type']} / {int(row['price']):,}원 / {int(row['printed_count'])}회 출력"
+                    )
+                with col3:
+                    if st.button("🔁 재출력했다고 표시(횟수 +1)", key=f"re_print_{row['id']}"):
+                        mark_printed(row["id"])
+                        st.success(f"번호 {row['id']} 전표를 '재출력'으로 1회 추가 기록했습니다.")
+                        st.rerun()
+
+    # 마지막으로 본 전표 내용 한 번에 보여주기
+    if "last_receipt" in st.session_state:
+        st.markdown("---")
+        mode = st.session_state.get("last_receipt_mode", "")
+        rid = st.session_state.get("last_receipt_id", "")
+        title = "신규 출력 전표" if mode == "new" else "재출력 전표"
+        st.markdown(f"#### 🧾 {title} (번호 {rid})")
+        st.text_area(
+            "전표 내용 (브라우저에서 Ctrl+P로 인쇄하세요)",
+            value=st.session_state["last_receipt"],
+            height=260,
+        )
+        st.caption("※ 이 텍스트 영역에서 바로 인쇄는 안 되고, 브라우저 인쇄 기능(Ctrl+P)을 사용하면 됩니다.")
+
+
+# ---------------------------
+# 매출 내역 보기
 # ---------------------------
 def page_list():
     st.header("📋 매출 내역")
@@ -651,6 +802,7 @@ def page_list():
     df_display["품"] = df_display["work_width"].replace({1: "✓", 0: ""})
     df_display["선결제"] = df_display["is_prepaid"].replace({1: "선결제", 0: "미결제"})
     df_display["찾음여부"] = df_display["picked_up"].replace({1: "찾아감", 0: "보관중"})
+    df_display["출력횟수"] = df_display["printed_count"]
 
     df_display.rename(
         columns={
@@ -685,14 +837,16 @@ def page_list():
                 "결제수단",
                 "선결제",
                 "찾음여부",
+                "출력횟수",
                 "메모",
             ]
-        ]
+        ],
+        use_container_width=True,
     )
 
 
 # ---------------------------
-# 데이터 수정 (수정 & 삭제 & 전표 미리보기)
+# 데이터 수정 / 삭제
 # ---------------------------
 def page_edit():
     st.header("✏️ 데이터 수정 / 삭제 / 전표 미리보기")
@@ -719,20 +873,36 @@ def page_edit():
     st.markdown("#### 현재 데이터 (요약)")
     st.dataframe(df[["id", "dropoff_date", "customer_name", "item_type", "price"]])
 
-    job_id = st.selectbox(
-        "수정할 번호 선택",
-        df["id"].tolist(),
-    )
+    # 각 행마다 '이 건 수정하기' 버튼
+    st.markdown("#### 수정할 건 선택")
+    if "edit_job_id" not in st.session_state and not df.empty:
+        st.session_state.edit_job_id = int(df.iloc[0]["id"])
+
+    for _, row in df.iterrows():
+        col1, col2 = st.columns([1, 5])
+        with col1:
+            if st.button("✏️ 이 건 수정하기", key=f"edit_btn_{row['id']}"):
+                st.session_state.edit_job_id = int(row["id"])
+                st.rerun()
+        with col2:
+            st.markdown(
+                f"**[{row['id']}] {row['customer_name'] or '이름 없음'}** / {row['item_type']} / {int(row['price']):,}원"
+            )
+
+    job_id = st.session_state.get("edit_job_id")
+    if job_id is None:
+        st.info("수정할 건을 위에서 선택해 주세요.")
+        return
 
     row = df[df["id"] == job_id].iloc[0]
 
     st.markdown("---")
     st.subheader(f"번호 {job_id} 수정하기")
 
-    # 날짜들
     dropoff_date_input = st.date_input(
         "맡긴 날",
         value=datetime.strptime(row["dropoff_date"], "%Y-%m-%d").date(),
+        key="edit_dropoff_date",
     )
 
     pickup_date_input = st.date_input(
@@ -742,28 +912,40 @@ def page_edit():
             if row["pickup_date"]
             else date.today()
         ),
+        key="edit_pickup_date",
     )
 
-    customer_name = st.text_input("고객 이름", value=row["customer_name"] or "")
-    customer_phone = st.text_input(
-        "연락처",
-        value=row["customer_phone"] or "010-",
+    customer_name = st.text_input(
+        "고객 이름", value=row["customer_name"] or "", key="edit_customer_name"
     )
-    item_type = st.text_input("옷 종류", value=row["item_type"])
+    customer_phone = st.text_input(
+        "연락처", value=row["customer_phone"] or "010-", key="edit_customer_phone"
+    )
+    item_type = st.text_input(
+        "옷 종류", value=row["item_type"], key="edit_item_type"
+    )
 
     col_w1, col_w2, col_w3, col_w4 = st.columns(4)
     with col_w1:
-        work_hem = st.checkbox("기장", value=bool(row["work_hem"]))
+        work_hem = st.checkbox("기장", value=bool(row["work_hem"]), key="edit_work_hem")
     with col_w2:
-        work_sleeve = st.checkbox("소매", value=bool(row["work_sleeve"]))
+        work_sleeve = st.checkbox(
+            "소매", value=bool(row["work_sleeve"]), key="edit_work_sleeve"
+        )
     with col_w3:
-        work_width = st.checkbox("품", value=bool(row["work_width"]))
+        work_width = st.checkbox(
+            "품", value=bool(row["work_width"]), key="edit_work_width"
+        )
     with col_w4:
-        work_other_flag = st.checkbox("기타 있음", value=bool(row["work_other"]))
+        work_other_flag = st.checkbox(
+            "기타 있음", value=bool(row["work_other"]), key="edit_work_other_flag"
+        )
 
     work_other = ""
     if work_other_flag:
-        work_other = st.text_input("기타 작업내용", value=row["work_other"] or "")
+        work_other = st.text_input(
+            "기타 작업내용", value=row["work_other"] or "", key="edit_work_other"
+        )
 
     price = st.number_input(
         "금액(원)",
@@ -771,6 +953,7 @@ def page_edit():
         step=1000,
         value=int(row["price"]),
         format="%d",
+        key="edit_price",
     )
 
     payment_options = ["카드", "현금", "계좌이체"]
@@ -781,23 +964,26 @@ def page_edit():
         if row["payment_method"] in payment_options
         else 0,
         horizontal=True,
+        key="edit_payment_method",
     )
 
     pay_timing = st.radio(
         "결제 시점",
         ["맡길 때 결제함", "나중에 결제(미결제)"],
         index=0 if row["is_prepaid"] == 1 else 1,
+        key="edit_pay_timing",
     )
     is_prepaid = 1 if pay_timing == "맡길 때 결제함" else 0
 
     picked_up = st.checkbox(
         "이미 찾아감 처리",
         value=bool(row["picked_up"]),
+        key="edit_picked_up",
     )
 
-    memo = st.text_input("메모", value=row["memo"] or "")
+    memo = st.text_input("메모", value=row["memo"] or "", key="edit_memo")
 
-    # 🔎 작업 전표 미리보기 (내부 보관용)
+    # 전표 미리보기
     st.markdown("#### 🧾 작업 전표 미리보기 (내부 보관용)")
 
     tasks = []
@@ -837,7 +1023,7 @@ def page_edit():
 """
 
     st.text_area("전표 내용", value=receipt_text, height=260)
-    st.caption("※ 실제 영수증 프린터로 인쇄할 때는 브라우저 인쇄(Ctrl+P)와 작은 용지 설정을 사용하면 됩니다.")
+    st.caption("※ 인쇄는 브라우저 Ctrl+P를 사용하세요.")
 
     col_b1, col_b2 = st.columns(2)
     with col_b1:
@@ -901,7 +1087,7 @@ def page_monthly_summary():
         .reset_index()
     )
 
-    st.dataframe(summary)
+    st.dataframe(summary, use_container_width=True)
 
     latest = summary.iloc[-1]
     st.subheader(f"📌 최근 월 ({latest['year_month']})")
