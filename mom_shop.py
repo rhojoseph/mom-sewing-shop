@@ -222,10 +222,10 @@ def admin_login():
 # 메인
 # ---------------------------
 def main():
-    st.set_page_config(page_title="엄마 수선가게 매출장", layout="centered")
+    st.set_page_config(page_title="에벤에셀옷수선 매출장", layout="centered")
     init_db()
 
-    st.title("👗 엄마 수선가게 매출장")
+    st.title("👗 에벤에셀옷수선 매출장")
 
     # 관리자 로그인 영역
     admin_login()
@@ -585,10 +585,10 @@ def page_list():
 
 
 # ---------------------------
-# 데이터 수정 (수정 & 삭제)
+# 데이터 수정 (수정 & 삭제 & 전표 미리보기)
 # ---------------------------
 def page_edit():
-    st.header("✏️ 데이터 수정 / 삭제")
+    st.header("✏️ 데이터 수정 / 삭제 / 전표 미리보기")
 
     if not st.session_state.get("is_admin", False):
         st.warning("관리자 비밀번호를 입력해야 수정/삭제를 할 수 있습니다.")
@@ -687,6 +687,49 @@ def page_edit():
 
     memo = st.text_input("메모", value=row["memo"] or "")
 
+    # 🔎 작업 전표 미리보기 (내부 보관용)
+    st.markdown("#### 🧾 작업 전표 미리보기 (내부 보관용)")
+
+    tasks = []
+    if work_hem:
+        tasks.append("기장")
+    if work_sleeve:
+        tasks.append("소매")
+    if work_width:
+        tasks.append("품")
+    if work_other_flag and work_other:
+        tasks.append(work_other)
+
+    task_text = ", ".join(tasks) if tasks else "없음"
+
+    payment_status = "결제 완료" if is_prepaid == 1 else "미결제"
+
+    receipt_text = f"""────────────────────────
+        에벤에셀옷수선
+────────────────────────
+고객명: {customer_name or ''}
+연락처: {customer_phone or ''}
+
+맡긴날: {dropoff_date_input.strftime('%Y-%m-%d')}
+찾는날: {pickup_date_input.strftime('%Y-%m-%d')}
+
+종류: {item_type}
+작업: {task_text}
+
+결제 여부: {payment_status}
+결제수단: {payment_method}
+
+금액: {int(price):,}원
+번호(ID): #{job_id}
+────────────────────────
+        내부 보관용
+────────────────────────
+"""
+
+    st.text_area("전표 내용", value=receipt_text, height=260)
+
+    st.caption("※ 나중에 영수증 프린터를 연결하면, 이 내용을 기준으로 작은 용지로 인쇄하면 됩니다.")
+
     col_b1, col_b2 = st.columns(2)
     with col_b1:
         if st.button("💾 수정 내용 저장하기", use_container_width=True):
@@ -765,4 +808,3 @@ def page_monthly_summary():
 # ---------------------------
 if __name__ == "__main__":
     main()
-
