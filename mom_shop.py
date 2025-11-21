@@ -5,6 +5,10 @@ from datetime import datetime, date, timedelta
 
 DB_PATH = "mom_shop.db"
 
+# 🔐 관리자 비밀번호 (원하는 값으로 바꿔 사용하면 됨)
+ADMIN_PASSWORD = "1234"
+
+
 # ---------------------------
 # DB 초기화
 # ---------------------------
@@ -35,6 +39,7 @@ def init_db():
     )
     conn.commit()
     conn.close()
+
 
 def insert_job(
     dropoff_date,
@@ -83,6 +88,7 @@ def insert_job(
     )
     conn.commit()
     conn.close()
+
 
 def update_job(
     job_id,
@@ -143,6 +149,15 @@ def update_job(
     conn.commit()
     conn.close()
 
+
+def delete_job(job_id):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
+    conn.commit()
+    conn.close()
+
+
 def load_jobs(start_date=None, end_date=None):
     conn = sqlite3.connect(DB_PATH)
     query = "SELECT * FROM jobs"
@@ -157,6 +172,7 @@ def load_jobs(start_date=None, end_date=None):
     conn.close()
     return df
 
+
 def load_jobs_by_pickup(target_date):
     """찾는 날 기준으로 특정 날짜 찾아갈 옷 조회 (picked_up=0만)"""
     conn = sqlite3.connect(DB_PATH)
@@ -169,6 +185,7 @@ def load_jobs_by_pickup(target_date):
     conn.close()
     return df
 
+
 def mark_picked_up(job_id):
     """해당 옷을 '찾아감' 상태로 변경"""
     conn = sqlite3.connect(DB_PATH)
@@ -176,6 +193,30 @@ def mark_picked_up(job_id):
     cur.execute("UPDATE jobs SET picked_up = 1 WHERE id = ?", (job_id,))
     conn.commit()
     conn.close()
+
+
+# ---------------------------
+# 관리자 로그인 처리
+# ---------------------------
+def admin_login():
+    if "is_admin" not in st.session_state:
+        st.session_state.is_admin = False
+
+    with st.expander("🔐 관리자 로그인", expanded=not st.session_state.is_admin):
+        pwd = st.text_input("비밀번호", type="password")
+        if st.button("로그인"):
+            if pwd == ADMIN_PASSWORD:
+                st.session_state.is_admin = True
+                st.success("관리자 모드로 로그인되었습니다.")
+            else:
+                st.session_state.is_admin = False
+                st.error("비밀번호가 올바르지 않습니다.")
+
+    if st.session_state.is_admin:
+        st.caption("✅ 관리자 모드: 편집 / 삭제 / 입력 가능")
+    else:
+        st.caption("ℹ️ 관리자 비밀번호를 입력하지 않으면 조회만 가능합니다.")
+
 
 # ---------------------------
 # 메인
@@ -185,6 +226,9 @@ def main():
     init_db()
 
     st.title("👗 엄마 수선가게 매출장")
+
+    # 관리자 로그인 영역
+    admin_login()
 
     menu = st.radio(
         "메뉴 선택",
@@ -202,6 +246,7 @@ def main():
         page_edit()
     else:
         page_monthly_summary()
+
 
 # ---------------------------
 # 대시보드 (날짜 선택 가능)
@@ -233,13 +278,40 @@ def page_dashboard():
     st.markdown("---")
     st.markdown(f"### 🔽 {target_str} 에 찾으러 올 옷 리스트")
 
+    is_admin = st.session_state.get("is_admin", False)
+
     for _, row in df.iterrows():
-        col1, col2 = st.columns([1, 4])
+        if is_admin:
+            col1, col2 = st.columns([1, 4])
+            with col1:
+                checked = st.checkbox("찾음", key=f"pickup_{row['id']}")
+            with col2:
+                tasks = []
+                if row['work_hem']:
+                    tasks.append("기장")
+                if row['work_sleeve']:
+                    tasks.append("소매")
+                if row['work_width']:
+                    tasks.append("품")
+                if row['work_other']:
+                    tasks.append(row['work_other'])
 
-        with col1:
-            checked = st.checkbox("찾음", key=f"pickup_{row['id']}")
+                st.markdown(
+                    f"""
+                    **[{row['id']}] {row['customer_name'] or '이름 없음'}**  
+                    - 연락처: {row['customer_phone'] or '없음'}  
+                    - 맡긴 날: {row['dropoff_date']}  
+                    - 옷 종류: {row['item_type']}  
+                    - 작업: {", ".join(tasks) if tasks else "기록 없음"}  
+                    - 금액: {int(row['price']):,}원 | 결제: {row['payment_method']}
+                    """
+                )
 
-        with col2:
+            if checked:
+                mark_picked_up(row["id"])
+                st.rerun()
+        else:
+            # 조회 전용: 체크박스 없이 정보만 표시
             tasks = []
             if row['work_hem']:
                 tasks.append("기장")
@@ -257,19 +329,21 @@ def page_dashboard():
                 - 맡긴 날: {row['dropoff_date']}  
                 - 옷 종류: {row['item_type']}  
                 - 작업: {", ".join(tasks) if tasks else "기록 없음"}  
-                - 금액: {int(row['price']):,}원 | 결제: {row['payment_method']}
+                - 금액: {int(row['price']):,}원 | 결제: {row['payment_method']}  
+                - 상태: 아직 찾아가지 않음
                 """
             )
 
-        if checked:
-            mark_picked_up(row["id"])
-            st.rerun()
 
 # ---------------------------
 # 입력 화면
 # ---------------------------
 def page_input():
     st.header("📝 매출 입력하기")
+
+    if not st.session_state.get("is_admin", False):
+        st.warning("관리자 비밀번호를 입력해야 매출을 입력할 수 있습니다.")
+        return
 
     # 최근 손님 유지용 세션 변수
     if "last_customer_name" not in st.session_state:
@@ -416,25 +490,23 @@ def page_input():
         # 저장 후 기본 금액 4,000원으로 초기화
         st.session_state.current_price = 4000
 
-        # ✅ 여기서 로직: 체크 안 하면 초기화, 체크하면 유지
+        # 같은 고객 이어서 입력 여부
         if same_customer:
-            # 같은 고객 이어서 → 정보 유지
             st.session_state.last_customer_name = customer_name
             st.session_state.last_customer_phone = customer_phone
             st.session_state.last_dropoff_date = dropoff_date_input
             st.session_state.last_pickup_date = pickup_date_input
         else:
-            # 체크 안 하면 → 전부 초기화
             st.session_state.last_customer_name = ""
             st.session_state.last_customer_phone = ""
             st.session_state.last_dropoff_date = date.today()
             st.session_state.last_pickup_date = date.today() + timedelta(days=3)
 
-        # 세션 상태 반영해서 폼 전체 다시 그림
         st.rerun()
 
+
 # ---------------------------
-# 내역 보기
+# 내역 보기 (조회 전용)
 # ---------------------------
 def page_list():
     st.header("📋 매출 내역")
@@ -511,11 +583,16 @@ def page_list():
         ]
     )
 
+
 # ---------------------------
-# 데이터 수정
+# 데이터 수정 (수정 & 삭제)
 # ---------------------------
 def page_edit():
-    st.header("✏️ 데이터 수정")
+    st.header("✏️ 데이터 수정 / 삭제")
+
+    if not st.session_state.get("is_admin", False):
+        st.warning("관리자 비밀번호를 입력해야 수정/삭제를 할 수 있습니다.")
+        return
 
     today = date.today()
     start_date, end_date = st.date_input(
@@ -553,9 +630,11 @@ def page_edit():
 
     pickup_date_input = st.date_input(
         "찾는 날",
-        value=datetime.strptime(row["pickup_date"], "%Y-%m-%d").date()
-        if row["pickup_date"]
-        else date.today(),
+        value=(
+            datetime.strptime(row["pickup_date"], "%Y-%m-%d").date()
+            if row["pickup_date"]
+            else date.today()
+        ),
     )
 
     customer_name = st.text_input("고객 이름", value=row["customer_name"] or "")
@@ -584,10 +663,13 @@ def page_edit():
         format="%d",
     )
 
+    payment_options = ["카드", "현금", "계좌이체"]
     payment_method = st.radio(
         "결제 수단",
-        ["카드", "현금", "계좌이체"],
-        index=["카드", "현금", "계좌이체"].index(row["payment_method"]),
+        payment_options,
+        index=payment_options.index(row["payment_method"])
+        if row["payment_method"] in payment_options
+        else 0,
         horizontal=True,
     )
 
@@ -605,26 +687,35 @@ def page_edit():
 
     memo = st.text_input("메모", value=row["memo"] or "")
 
-    if st.button("💾 수정 내용 저장하기", use_container_width=True):
-        update_job(
-            job_id,
-            dropoff_date_input.strftime("%Y-%m-%d"),
-            customer_name,
-            customer_phone,
-            item_type,
-            int(work_hem),
-            int(work_sleeve),
-            int(work_width),
-            work_other if work_other_flag else "",
-            int(price),
-            payment_method,
-            is_prepaid,
-            pickup_date_input.strftime("%Y-%m-%d"),
-            1 if picked_up else 0,
-            memo,
-        )
-        st.success("수정되었습니다.")
-        st.rerun()
+    col_b1, col_b2 = st.columns(2)
+    with col_b1:
+        if st.button("💾 수정 내용 저장하기", use_container_width=True):
+            update_job(
+                job_id,
+                dropoff_date_input.strftime("%Y-%m-%d"),
+                customer_name,
+                customer_phone,
+                item_type,
+                int(work_hem),
+                int(work_sleeve),
+                int(work_width),
+                work_other if work_other_flag else "",
+                int(price),
+                payment_method,
+                is_prepaid,
+                pickup_date_input.strftime("%Y-%m-%d"),
+                1 if picked_up else 0,
+                memo,
+            )
+            st.success("수정되었습니다.")
+            st.rerun()
+
+    with col_b2:
+        if st.button("🗑️ 이 건 삭제하기", use_container_width=True):
+            delete_job(job_id)
+            st.success(f"번호 {job_id} 데이터가 삭제되었습니다.")
+            st.rerun()
+
 
 # ---------------------------
 # 월별 합계
@@ -668,8 +759,10 @@ def page_monthly_summary():
         f"- 고객수: {int(latest['고객수'])} 명"
     )
 
+
 # ---------------------------
 # 실행
 # ---------------------------
 if __name__ == "__main__":
     main()
+
